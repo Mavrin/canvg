@@ -82,6 +82,67 @@
 		}
 	}
 
+	// see https://developer.mozilla.org/en-US/docs/Web/API/Element.matches
+	var matchesSelector;
+	if (typeof(Element.prototype.matches) != 'undefined') {
+		matchesSelector = function(node, selector) {
+			return node.matches(selector);
+		};
+	} else if (typeof(Element.prototype.webkitMatchesSelector) != 'undefined') {
+		matchesSelector = function(node, selector) {
+			return node.webkitMatchesSelector(selector);
+		};
+	} else if (typeof(Element.prototype.mozMatchesSelector) != 'undefined') {
+		matchesSelector = function(node, selector) {
+			return node.mozMatchesSelector(selector);
+		};
+	} else if (typeof(Element.prototype.msMatchesSelector) != 'undefined') {
+		matchesSelector = function(node, selector) {
+			return node.msMatchesSelector(selector);
+		};
+	} else if (typeof(Element.prototype.oMatchesSelector) != 'undefined') {
+		matchesSelector = function(node, selector) {
+			return node.oMatchesSelector(selector);
+		};
+	} else {
+		// requires Sizzle: https://github.com/jquery/sizzle/wiki/Sizzle-Documentation
+		// without Sizzle, this is a ReferenceError
+		matchesSelector = Sizzle.matchesSelector;
+	}
+
+	// slightly modified version of https://github.com/keeganstreet/specificity/blob/master/specificity.js
+	var attributeRegex = /(\[[^\]]+\])/g;
+	var idRegex = /(#[^\s\+>~\.\[:]+)/g;
+	var classRegex = /(\.[^\s\+>~\.\[:]+)/g;
+	var pseudoElementRegex = /(::[^\s\+>~\.\[:]+|:first-line|:first-letter|:before|:after)/gi;
+	var pseudoClassWithBracketsRegex = /(:[\w-]+\([^\)]*\))/gi;
+	var pseudoClassRegex = /(:[^\s\+>~\.\[:]+)/g;
+	var elementRegex = /([^\s\+>~\.\[:]+)/g;
+	function getSelectorSpecificity(selector) {
+		var typeCount = [0, 0, 0];
+		var findMatch = function(regex, type) {
+			var matches = selector.match(regex);
+			if (matches == null) {
+				return;
+			}
+			typeCount[type] += matches.length;
+			selector = selector.replace(regex, ' ');
+		};
+
+		selector = selector.replace(/:not\(([^\)]*)\)/g, '     $1 ');
+		selector = selector.replace(/{[^]*/gm, ' ');
+		findMatch(attributeRegex, 1);
+		findMatch(idRegex, 0);
+		findMatch(classRegex, 1);
+		findMatch(pseudoElementRegex, 2);
+		findMatch(pseudoClassWithBracketsRegex, 1);
+		findMatch(pseudoClassRegex, 1);
+		selector = selector.replace(/[\*\s\+>~]/g, ' ');
+		selector = selector.replace(/[#\.]/g, ' ');
+		findMatch(elementRegex, 2);
+		return typeCount.join('');
+	}
+
 	function build(opts) {
 		var svg = { opts: opts };
 
@@ -99,6 +160,7 @@
 			svg.UniqueId = function () { uniqueId++; return 'canvg' + uniqueId;	};
 			svg.Definitions = {};
 			svg.Styles = {};
+			svg.StylesSpecificity = {};
 			svg.Animations = [];
 			svg.Images = [];
 			svg.ctx = ctx;
@@ -681,6 +743,7 @@
 		svg.Element.ElementBase = function(node) {
 			this.attributes = {};
 			this.styles = {};
+			this.stylesSpecificity = {};
 			this.children = [];
 
 			// get or create attribute
@@ -782,39 +845,22 @@
 					this.attributes[attribute.nodeName] = new svg.Property(attribute.nodeName, attribute.nodeValue);
 				}
 
-				// add tag styles
-				var styles = svg.Styles[node.nodeName];
-				if (styles != null) {
-					for (var name in styles) {
-						this.styles[name] = styles[name];
-					}
-				}
-
-				// add class styles
-				if (this.attribute('class').hasValue()) {
-					var classes = svg.compressSpaces(this.attribute('class').value).split(' ');
-					for (var j=0; j<classes.length; j++) {
-						styles = svg.Styles['.'+classes[j]];
+				// add styles
+				for (var selector in svg.Styles) {
+					if (matchesSelector(node, selector)) {
+						var styles = svg.Styles[selector];
+						var specificity = svg.StylesSpecificity[selector];
 						if (styles != null) {
 							for (var name in styles) {
-								this.styles[name] = styles[name];
+								var existingSpecificity = this.stylesSpecificity[name];
+								if (typeof(existingSpecificity) == 'undefined') {
+									existingSpecificity = '000';
+								}
+								if (specificity > existingSpecificity) {
+									this.styles[name] = styles[name];
+									this.stylesSpecificity[name] = specificity;
+								}
 							}
-						}
-						styles = svg.Styles[node.nodeName+'.'+classes[j]];
-						if (styles != null) {
-							for (var name in styles) {
-								this.styles[name] = styles[name];
-							}
-						}
-					}
-				}
-
-				// add id styles
-				if (this.attribute('id').hasValue()) {
-					var styles = svg.Styles['#' + this.attribute('id').value];
-					if (styles != null) {
-						for (var name in styles) {
-							this.styles[name] = styles[name];
 						}
 					}
 				}
@@ -2406,6 +2452,7 @@
 								}
 							}
 							svg.Styles[cssClass] = props;
+							svg.StylesSpecificity[cssClass] = getSelectorSpecificity(cssClass);
 							if (cssClass == '@font-face') {
 								var fontFamily = props['font-family'].value.replace(/"/g,'');
 								var srcs = props['src'].value.split(',');
@@ -2957,20 +3004,20 @@
 		return svg;
 	}
 
-	if (typeof(CanvasRenderingContext2D) != 'undefined') {
-		CanvasRenderingContext2D.prototype.drawSvg = function(s, dx, dy, dw, dh) {
-			canvg(this.canvas, s, {
-				ignoreMouse: true,
-				ignoreAnimation: true,
-				ignoreDimensions: true,
-				ignoreClear: true,
-				offsetX: dx,
-				offsetY: dy,
-				scaleWidth: dw,
-				scaleHeight: dh
-			});
-		}
+if (typeof(CanvasRenderingContext2D) != 'undefined') {
+	CanvasRenderingContext2D.prototype.drawSvg = function(s, dx, dy, dw, dh) {
+		canvg(this.canvas, s, {
+			ignoreMouse: true,
+			ignoreAnimation: true,
+			ignoreDimensions: true,
+			ignoreClear: true,
+			offsetX: dx,
+			offsetY: dy,
+			scaleWidth: dw,
+			scaleHeight: dh
+		});
 	}
+}
 
 	return canvg;
 
